@@ -1,0 +1,14 @@
+{
+  "model_type": "tcn",
+  "mel_time": 98,
+  "version": "9.3",
+  "multi_model": true,
+  "models": [
+    {
+      "wake_word": "enigma",
+      "model_file": "enigma.onnx",
+      "emb_frames": 1,
+      "cons_frames": 3
+    }
+  ]
+}
