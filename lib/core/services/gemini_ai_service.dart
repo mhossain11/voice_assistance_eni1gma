@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
@@ -27,12 +29,9 @@ class GeminiAIService implements AIService {
           ),
       _model =
           model ??
-          _configuredValue(
-            _localEnvironmentValue('GEMINI_MODEL'),
-            const String.fromEnvironment(
-              'GEMINI_MODEL',
-              defaultValue: 'gemini-3.6-flash',
-            ),
+          const String.fromEnvironment(
+            'GEMINI_MODEL',
+            defaultValue: 'gemini-3.6-flash',
           );
 
   final http.Client _client;
@@ -49,8 +48,9 @@ class GeminiAIService implements AIService {
       throw const AIServiceException('Gemini service is unavailable.');
     }
     if (_apiKey.trim().isEmpty) {
+      _log('API key missing');
       throw const AIServiceException(
-        'Gemini is not configured. Add GEMINI_API_KEY to .env.',
+        'Gemini is not configured. Add GEMINI_API_KEY before running the app.',
       );
     }
     final contents = [
@@ -62,13 +62,17 @@ class GeminiAIService implements AIService {
         ],
       },
     ];
+    final endpoint = Uri.https(
+      'generativelanguage.googleapis.com',
+      '/v1beta/models/$_model:generateContent',
+    );
+    _log('request started');
+    _log('model=$_model');
+    _log('endpoint=$endpoint');
     try {
       final response = await _client
           .post(
-            Uri.https(
-              'generativelanguage.googleapis.com',
-              '/v1beta/models/$_model:generateContent',
-            ),
+            endpoint,
             headers: {
               'Content-Type': 'application/json',
               'x-goog-api-key': _apiKey,
@@ -83,11 +87,16 @@ class GeminiAIService implements AIService {
               'generationConfig': {'maxOutputTokens': 280, 'temperature': 0.5},
             }),
           )
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 60));
+      _log('response status=${response.statusCode}');
+      _log('response received');
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        final error = _safeApiError(response.body);
+        _log('API error: $error');
         throw const AIServiceException("Sorry, I couldn't reach Gemini.");
       }
-      final payload = jsonDecode(response.body) as Map<String, dynamic>;
+      final payload = _decodeResponse(response.body);
+      _log('response parsed');
       final candidates = payload['candidates'] as List<dynamic>?;
       final candidate = candidates?.firstOrNull as Map<String, dynamic>?;
       final content = candidate?['content'] as Map<String, dynamic>?;
@@ -99,17 +108,62 @@ class GeminiAIService implements AIService {
           .join()
           .trim();
       if (text == null || text.isEmpty) {
+        _log('parse error: empty response text');
         throw const AIServiceException('Gemini returned an empty response.');
       }
+      _log('response text length=${text.length}');
       return text;
     } on TimeoutException {
+      _log('timeout');
       throw const AIServiceException("Sorry, Gemini took too long to respond.");
+    } on SocketException catch (error) {
+      _log('network error: ${_safeNetworkReason(error)}');
+      throw const AIServiceException("Sorry, I couldn't reach Gemini.");
+    } on http.ClientException catch (error) {
+      _log('network error: ${_safeNetworkReason(error)}');
+      throw const AIServiceException("Sorry, I couldn't reach Gemini.");
+    } on FormatException catch (error) {
+      _log('parse error: ${error.message}');
+      throw const AIServiceException('Gemini returned an invalid response.');
+    } on TypeError {
+      _log('parse error: unexpected response shape');
+      throw const AIServiceException('Gemini returned an invalid response.');
     } on AIServiceException {
       rethrow;
-    } catch (_) {
+    } catch (error) {
+      _log('network error: ${error.runtimeType}');
       throw const AIServiceException("Sorry, I couldn't reach Gemini.");
     }
   }
+
+  Map<String, dynamic> _decodeResponse(String body) {
+    try {
+      return jsonDecode(body) as Map<String, dynamic>;
+    } on FormatException {
+      _log('parse error: invalid JSON');
+      rethrow;
+    } on TypeError {
+      _log('parse error: unexpected JSON shape');
+      throw const FormatException('Unexpected JSON shape.');
+    }
+  }
+
+  String _safeApiError(String body) {
+    try {
+      final decoded = jsonDecode(body) as Map<String, dynamic>;
+      final error = decoded['error'] as Map<String, dynamic>?;
+      final status = error?['status'] as String?;
+      final message = error?['message'] as String?;
+      if (status != null && message != null) return '$status: $message';
+      return status ?? message ?? 'No API error detail supplied.';
+    } catch (_) {
+      return 'Unreadable API error response.';
+    }
+  }
+
+  String _safeNetworkReason(Object error) => error.runtimeType.toString();
+
+  void _log(String message) => debugPrint('[GEMINI] $message');
 
   Map<String, dynamic> _contentFor(ConversationMessage message) => {
     'role': message.role == 'assistant' ? 'model' : 'user',
