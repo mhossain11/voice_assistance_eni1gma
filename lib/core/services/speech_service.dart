@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:speech_to_text/speech_recognition_error.dart';
 import 'package:speech_to_text/speech_recognition_result.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
@@ -59,6 +60,7 @@ class NativeSpeechService implements SpeechService {
   Future<void> startListening() async {
     await initialize();
     if (_speech.isListening) return;
+    debugPrint('[STT] session started');
     await _speech.listen(
       onResult: _onResult,
       listenOptions: stt.SpeechListenOptions(
@@ -74,7 +76,12 @@ class NativeSpeechService implements SpeechService {
 
   @override
   Future<void> stopListening() async {
-    if (_speech.isListening) await _speech.stop();
+    if (_speech.isListening) {
+      await _speech.stop();
+    } else {
+      await _speech.cancel();
+    }
+    debugPrint('[STT] session stopped');
     if (!_disposed) _listeningState.add(false);
   }
 
@@ -93,6 +100,7 @@ class NativeSpeechService implements SpeechService {
 
   void _onError(SpeechRecognitionError error) {
     if (!_disposed) {
+      debugPrint('[STT] error=${error.errorMsg}');
       _errors.add(error.errorMsg);
       _listeningState.add(false);
     }

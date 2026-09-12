@@ -44,6 +44,7 @@ class AssistantController {
   bool _sessionActive = false;
   int _sessionGeneration = 0;
   bool _wakeWordRunning = false;
+  bool _recoveringSpeech = false;
 
   Future<void> initialize() async {
     if (_initialized) return;
@@ -70,7 +71,9 @@ class AssistantController {
       _speechListeningSubscription = _speechService.listeningState.listen(
         (listening) => debugPrint('[STT] Listening: $listening'),
       );
-      _speechErrorSubscription = _speechService.errors.listen(_setError);
+      _speechErrorSubscription = _speechService.errors.listen(
+        _handleSpeechError,
+      );
       _ttsErrorSubscription = _ttsService.errors.listen(_setError);
       await startSleepingMode();
     } catch (error) {
@@ -123,7 +126,7 @@ class AssistantController {
     currentResponse.value = '';
     _setState(AssistantState.listening);
     try {
-      await _speechService.startListening();
+      await _startActiveSpeechListening();
     } catch (error) {
       _setError(_messageFor(error));
     }
@@ -172,12 +175,12 @@ class AssistantController {
         return;
       }
       _setState(AssistantState.listening);
-      await _speechService.startListening();
+      await _startActiveSpeechListening();
     } catch (error) {
       if (_isCurrentSession(generation)) {
         _setError(_messageFor(error));
         _setState(AssistantState.listening);
-        await _speechService.startListening();
+        await _startActiveSpeechListening();
       }
     } finally {
       if (_sessionGeneration == generation) _isProcessingRequest = false;
@@ -191,7 +194,7 @@ class AssistantController {
     }
     if (state.value == AssistantState.listening) {
       try {
-        await _speechService.startListening();
+        await _startActiveSpeechListening();
       } catch (error) {
         _setError(_messageFor(error));
       }
@@ -199,6 +202,47 @@ class AssistantController {
   }
 
   Future<void> stopSpeechListening() => _speechService.stopListening();
+
+  Future<void> _startActiveSpeechListening() async {
+    if (_disposed || !_sessionActive || state.value != AssistantState.listening) {
+      return;
+    }
+    debugPrint('[STT] recovery=start active session');
+    await _speechService.startListening();
+  }
+
+  void _handleSpeechError(String error) {
+    debugPrint('[STT] error=$error');
+    unawaited(_recoverFromSpeechError(error));
+  }
+
+  Future<void> _recoverFromSpeechError(String error) async {
+    if (_recoveringSpeech || _disposed) return;
+    if (!_sessionActive || state.value != AssistantState.listening) {
+      debugPrint('[STT] recovery=ignored stale error');
+      return;
+    }
+    _recoveringSpeech = true;
+    final generation = _sessionGeneration;
+    try {
+      debugPrint('[STT] recovery=release microphone');
+      await _speechService.stopListening();
+      if (!_isCurrentSession(generation) ||
+          state.value != AssistantState.listening) {
+        return;
+      }
+      debugPrint('[STT] recovery=restart active listening');
+      await _startActiveSpeechListening();
+    } catch (_) {
+      if (_isCurrentSession(generation)) {
+        _setError('Speech recognition stopped. Say “Enigma” to try again.');
+        debugPrint('[STT] recovery=sleeping wake word resumed');
+        await sleepAssistant();
+      }
+    } finally {
+      _recoveringSpeech = false;
+    }
+  }
   Future<void> goToSleep() async {
     await sleepAssistant();
   }

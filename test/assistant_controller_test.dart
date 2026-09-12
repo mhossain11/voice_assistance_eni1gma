@@ -150,6 +150,22 @@ void main() {
     expect(controller.state.value, AssistantState.listening);
     await controller.dispose();
   });
+
+  test('STT no-match releases and restarts the active listening attempt', () async {
+    final wake = _FakeWakeWordService();
+    final speech = _FakeSpeechService();
+    final controller = AssistantController(wake, speech, _FakeAIService(), _FakeTtsService());
+    await controller.initialize();
+    await controller.onWakeWordDetected();
+    speech.emitError('error_no_match');
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.state.value, AssistantState.listening);
+    expect(speech.stopCalls, greaterThanOrEqualTo(1));
+    expect(speech.startCalls, 2);
+    expect(wake.startCalls, 1);
+    await controller.dispose();
+  });
 }
 
 class _FakeWakeWordService implements WakeWordService {
@@ -197,6 +213,8 @@ class _FakeSpeechService implements SpeechService {
     _text.add(value);
     _finalText.add(value);
   }
+
+  void emitError(String value) => _errors.add(value);
 
   @override
   Future<void> initialize() async {}

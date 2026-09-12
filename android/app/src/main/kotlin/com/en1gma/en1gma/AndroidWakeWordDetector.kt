@@ -13,7 +13,11 @@ import java.util.Collections
 import kotlin.math.max
 
 /** Foreground-only 16 kHz PCM16 -> official mel ONNX -> supplied EN1GMA classifier. */
-class AndroidWakeWordDetector(private val context: Context, private val onDetected: () -> Unit) : AutoCloseable {
+class AndroidWakeWordDetector(
+    private val context: Context,
+    private val onDetected: () -> Unit,
+    private val onCaptureFailure: (Int) -> Unit,
+) : AutoCloseable {
     private val environment = OrtEnvironment.getEnvironment()
     private val melSession = sessionFromAsset("melspectrogram.onnx")
     private val classifierSession = sessionFromAsset("enigma.onnx")
@@ -24,14 +28,29 @@ class AndroidWakeWordDetector(private val context: Context, private val onDetect
     private var worker: Thread? = null
     @Volatile private var running = false
 
+    fun isWorkerAlive(): Boolean = worker?.isAlive == true
+    fun isRecording(): Boolean = recording?.recordingState == AudioRecord.RECORDSTATE_RECORDING
+
     @Synchronized fun start() {
         if (running) return
         val minBuffer = AudioRecord.getMinBufferSize(16_000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         require(minBuffer > 0) { "The device does not support 16 kHz mono PCM microphone capture." }
-        recording = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, 16_000, AudioFormat.CHANNEL_IN_MONO,
+        val newRecording = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, 16_000, AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT, max(minBuffer, 4096))
-        require(recording!!.state == AudioRecord.STATE_INITIALIZED) { "Microphone initialization failed." }
-        running = true; recording!!.startRecording()
+        try {
+            require(newRecording.state == AudioRecord.STATE_INITIALIZED) { "Microphone initialization failed." }
+            Log.i(tag, "[ENIGMA-AUDIO] AudioRecord state=${newRecording.state}")
+            newRecording.startRecording()
+            require(newRecording.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                "Microphone did not enter the recording state."
+            }
+            recording = newRecording
+        } catch (error: Exception) {
+            newRecording.release()
+            throw error
+        }
+        Log.i(tag, "[ENIGMA-AUDIO] recordingState=${newRecording.recordingState}")
+        running = true
         worker = Thread(::captureLoop, "En1gmaWakeWord").also { it.start() }
         Log.i(tag, "[WAKE] Listener started")
     }
@@ -47,9 +66,20 @@ class AndroidWakeWordDetector(private val context: Context, private val onDetect
 
     private fun captureLoop() {
         val ring = ShortArray(windowSamples); var count = 0; var write = 0; val readBuffer = ShortArray(640)
+        var readErrors = 0
         while (running) {
             val read = recording?.read(readBuffer, 0, readBuffer.size, AudioRecord.READ_BLOCKING) ?: break
-            if (read <= 0) continue
+            if (read < 0) {
+                Log.w(tag, "[ENIGMA-AUDIO] readError=$read")
+                if (++readErrors >= maxReadErrors && running) {
+                    running = false
+                    onCaptureFailure(read)
+                    break
+                }
+                continue
+            }
+            if (read == 0) continue
+            readErrors = 0
             for (index in 0 until read) { ring[write] = readBuffer[index]; write = (write + 1) % ring.size; if (count < ring.size) count++ }
             if (count == ring.size) evaluate(ShortArray(ring.size) { ring[(write + it) % ring.size] })
         }
@@ -76,5 +106,8 @@ class AndroidWakeWordDetector(private val context: Context, private val onDetect
 
     private fun sessionFromAsset(name: String): OrtSession = context.assets.open(name).use { environment.createSession(it.readBytes(), OrtSession.SessionOptions()) }
     override fun close() { stop(); melSession.close(); classifierSession.close() }
-    private companion object { const val tag = "EN1GMA" }
+    private companion object {
+        const val tag = "EN1GMA"
+        const val maxReadErrors = 3
+    }
 }
